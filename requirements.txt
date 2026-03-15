@@ -1,0 +1,12 @@
+python-telegram-bot==22.6
+python-binance==1.0.35
+google-genai
+pillow==12.1.1
+requests
+numpy
+httpx
+tenacity
+python-dotenv
+Framework
+
+openclaw==2026.3.3
