@@ -1,6 +1,6 @@
 python-telegram-bot==22.6
 python-binance==1.0.35
-google-genai
+google-generativeai
 pillow==12.1.1
 requests
 numpy
