@@ -1,13 +1,26 @@
-from binentor.openclaw.routing.router import route_skill
-from binentor.openclaw.memory.store import get_memory
+from pathlib import Path
+from binentor.google_ai_client import generate_response
+
+PERSONALITY_PATH = Path(__file__).resolve().parents[1] / "prompts" / "personality.md"
+
+
+def load_personality():
+
+    with open(PERSONALITY_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+PERSONALITY = load_personality()
 
 
 async def run_agent(user_id: str, message: str):
 
-    memory = get_memory(user_id)
+    system_prompt = PERSONALITY
 
-    skill = route_skill(message)
+    response = await generate_response(
+        system_prompt=system_prompt,
+        user_message=message,
+        user_id=user_id,
+    )
 
-    result = await skill.execute(message, memory)
-
-    return result["response"]
+    return response
