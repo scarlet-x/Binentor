@@ -1,4 +1,4 @@
-from binentor.integrations.google-ai_client import generate_response
+from binentor.integrations.google_ai_client import generate_response
 
 
 SYSTEM_PROMPT = """
