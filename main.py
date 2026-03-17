@@ -12,7 +12,7 @@ sys.path.append(str(BASE_DIR))
 def check_environment():
     """Validates that the bot has all required API tokens to function."""
     # Note: ENCRYPTION_KEY removed as we are using plain-text storage
-    required_vars = ["TELEGRAM_TOKEN", "GEMINI_API_KEY"]
+    required_vars = ["TELEGRAM_TOKEN", "GOOGLE_API_KEY"]
     missing = [var for var in required_vars if not os.getenv(var)]
     
     if missing:
