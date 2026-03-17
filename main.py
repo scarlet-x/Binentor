@@ -4,9 +4,11 @@ import re
 import logging
 import sqlite3
 import contextvars
+import requests
 from PIL import Image
 
-from telegram import Update, ReplyKeyboardRemove
+from telegram import Update
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler
@@ -89,6 +91,20 @@ def get_market_price(symbol):
         return "Invalid symbol"
 
 
+def get_crypto_price_coingecko(coin):
+    try:
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin.lower()}&vs_currencies=usd"
+        res = requests.get(url).json()
+
+        if coin.lower() in res:
+            price = res[coin.lower()]['usd']
+            return f"{coin.upper()} price: ${price}"
+        else:
+            return "Coin not found."
+    except Exception as e:
+        return str(e)
+
+
 def save_note(note):
     user_id = current_user_id.get()
     conn = sqlite3.connect('binentor.db')
@@ -109,7 +125,7 @@ def read_notes():
     return "Notes:\n" + "\n".join([r[0] for r in rows])
 
 
-# --- AI SETUP (Gemma compatible) ---
+# --- AI SETUP ---
 SYSTEM_PROMPT = """
 You are Binentor, a strict trading mentor.
 
@@ -122,13 +138,14 @@ If needed, respond EXACTLY like:
 
 TOOL_CALL: function_name(arg=value)
 
+DO NOT explain tool calls.
+
 Functions:
 - fetch_balance()
 - get_market_price(symbol)
+- get_crypto_price_coingecko(coin)
 - save_note(note)
 - read_notes()
-
-Otherwise respond normally.
 """
 
 model = genai.GenerativeModel(
@@ -164,6 +181,9 @@ def execute_tool(name, args):
 
     elif name == "get_market_price":
         return get_market_price(args.get("symbol", ""))
+
+    elif name == "get_crypto_price_coingecko":
+        return get_crypto_price_coingecko(args.get("coin", ""))
 
     elif name == "save_note":
         return save_note(args.get("note", ""))
@@ -223,28 +243,29 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_user_id.set(uid)
 
     if uid not in sessions:
-        sessions[uid] = model.start_chat()
+        sessions[uid] = model.start_chat(history=[
+            {"role": "user", "parts": [SYSTEM_PROMPT]}
+        ])
 
     chat = sessions[uid]
 
     try:
         user_text = update.message.text
 
-        # Inject system prompt every time (Gemma workaround)
-        full_prompt = f"{SYSTEM_PROMPT}\n\nUser: {user_text}"
+        # typing indicator
+        await update.message.chat.send_action(action=ChatAction.TYPING)
 
-        response = await chat.send_message_async(full_prompt)
-        text = response.text
+        response = await chat.send_message_async(user_text)
+        text = response.text.strip()
 
         tool, args = parse_tool(text)
 
         if tool:
             result = execute_tool(tool, args)
 
-            # Second pass with tool result
-            final_prompt = f"{SYSTEM_PROMPT}\n\nTool result: {result}"
-            final = await chat.send_message_async(final_prompt)
+            await update.message.chat.send_action(action=ChatAction.TYPING)
 
+            final = await chat.send_message_async(f"Tool result: {result}")
             await update.message.reply_text(final.text)
         else:
             await update.message.reply_text(text)
@@ -254,7 +275,7 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 
-# --- IMAGE HANDLER (still Gemini, Gemma can't see images) ---
+# --- IMAGE HANDLER ---
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = await update.message.photo[-1].get_file()
     buf = io.BytesIO()
@@ -288,5 +309,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_handler))
 
-    logger.info("Binentor running (Gemma mode)...")
+    logger.info("Binentor running (FINAL BUILD)...")
     app.run_polling()
