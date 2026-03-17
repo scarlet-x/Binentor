@@ -5,6 +5,10 @@ import logging
 import sqlite3
 import contextvars
 import requests
+import cv2
+import numpy as np
+import pytesseract
+
 from PIL import Image
 
 from telegram import Update
@@ -22,9 +26,22 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY)
+# --- MODEL WRAPPER ---
+class AIModel:
+    def __init__(self, model_name):
+        genai.configure(api_key=GOOGLE_API_KEY)
+        self.model = genai.GenerativeModel(model_name)
+
+    async def generate(self, content):
+        return await self.model.generate_content_async(content)
+
+    def start_chat(self, history):
+        return self.model.start_chat(history=history)
+
+
+chat_model = AIModel("gemma-3-27b-it")
 
 current_user_id = contextvars.ContextVar('current_user_id', default=None)
 
@@ -60,6 +77,32 @@ def get_client(user_id):
     if row:
         return BinanceClient(row[0], row[1])
     return None
+
+
+# --- IMAGE PROCESSING (NO AI) ---
+def extract_chart_data(pil_image):
+    img = np.array(pil_image)
+
+    # resize
+    img = cv2.resize(img, (1024, 1024))
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # edge detection
+    edges = cv2.Canny(gray, 50, 150)
+
+    # OCR
+    text = pytesseract.image_to_string(gray)
+
+    # basic stats
+    brightness = np.mean(gray)
+    edge_density = np.sum(edges > 0) / edges.size
+
+    return {
+        "ocr_text": text.strip(),
+        "brightness": round(float(brightness), 2),
+        "edge_density": round(float(edge_density), 4)
+    }
 
 
 # --- TOOLS ---
@@ -125,40 +168,30 @@ def read_notes():
     return "Notes:\n" + "\n".join([r[0] for r in rows])
 
 
-# --- AI SETUP ---
+# --- SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
 You are Binentor, a strict trading mentor.
 
-Rules:
-- Be sharp, direct, logical.
-- Focus on discipline, risk, and mistakes.
+Style:
+- Short
+- Sharp
+- No fluff
+
+Max 4 lines.
+
+Focus:
+- Risk
+- Execution
 
 Tool usage:
-If needed, respond EXACTLY like:
-
 TOOL_CALL: function_name(arg=value)
-
-DO NOT explain tool calls.
-
-Functions:
-- fetch_balance()
-- get_market_price(symbol)
-- get_crypto_price_coingecko(coin)
-- save_note(note)
-- read_notes()
 """
 
-model = genai.GenerativeModel(
-    model_name="gemma-3-27b-it"
-)
-
 sessions = {}
-
 
 # --- TOOL PARSER ---
 def parse_tool(text):
     match = re.search(r"TOOL_CALL:\s*(\w+)\((.*?)\)", text)
-
     if not match:
         return None, {}
 
@@ -178,16 +211,12 @@ def parse_tool(text):
 def execute_tool(name, args):
     if name == "fetch_balance":
         return fetch_balance()
-
     elif name == "get_market_price":
         return get_market_price(args.get("symbol", ""))
-
     elif name == "get_crypto_price_coingecko":
         return get_crypto_price_coingecko(args.get("coin", ""))
-
     elif name == "save_note":
         return save_note(args.get("note", ""))
-
     elif name == "read_notes":
         return read_notes()
 
@@ -237,13 +266,13 @@ async def save_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# --- MAIN AI LOOP ---
+# --- MAIN AI ---
 async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     current_user_id.set(uid)
 
     if uid not in sessions:
-        sessions[uid] = model.start_chat(history=[
+        sessions[uid] = chat_model.start_chat(history=[
             {"role": "user", "parts": [SYSTEM_PROMPT]}
         ])
 
@@ -251,8 +280,6 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         user_text = update.message.text
-
-        # typing indicator
         await update.message.chat.send_action(action=ChatAction.TYPING)
 
         response = await chat.send_message_async(user_text)
@@ -262,9 +289,6 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if tool:
             result = execute_tool(tool, args)
-
-            await update.message.chat.send_action(action=ChatAction.TYPING)
-
             final = await chat.send_message_async(f"Tool result: {result}")
             await update.message.reply_text(final.text)
         else:
@@ -275,16 +299,35 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 
-# --- IMAGE HANDLER ---
+# --- IMAGE HANDLER (NO VISION) ---
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    current_user_id.set(uid)
+
     photo = await update.message.photo[-1].get_file()
     buf = io.BytesIO()
     await photo.download_to_memory(buf)
 
     img = Image.open(buf)
 
-    vision = genai.GenerativeModel("gemini-1.5-pro")
-    res = await vision.generate_content_async(["Analyze this trading chart", img])
+    await update.message.chat.send_action(action=ChatAction.TYPING)
+
+    data = extract_chart_data(img)
+
+    prompt = f"""
+Chart Data:
+OCR: {data['ocr_text']}
+Brightness: {data['brightness']}
+Edge Density: {data['edge_density']}
+
+Task:
+- Is this a trading chart?
+- If yes: trend + bias (LONG/SHORT/WAIT)
+
+Max 4 lines.
+"""
+
+    res = await chat_model.generate(prompt)
 
     await update.message.reply_text(res.text)
 
@@ -309,5 +352,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_handler))
 
-    logger.info("Binentor running (FINAL BUILD)...")
+    logger.info("Binentor running (NO VISION MODE)...")
     app.run_polling()
