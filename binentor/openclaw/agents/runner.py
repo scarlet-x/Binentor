@@ -1,5 +1,5 @@
 from pathlib import Path
-from binentor.google_ai_client import generate_response
+from binentor.integrations.google_ai_client import generate_response
 
 PERSONALITY_PATH = Path(__file__).resolve().parents[1] / "prompts" / "personality.md"
 
