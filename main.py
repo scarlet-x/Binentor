@@ -10,22 +10,14 @@ sys.path.append(str(BASE_DIR))
 
 # --- 2. PRE-FLIGHT CHECKLIST ---
 def check_environment():
-    """Validates that the 'Binentor' has all the required tools to function."""
-    required_vars = ["TELEGRAM_TOKEN", "GOOGLE_API_KEY", "ENCRYPTION_KEY"]
+    """Validates that the bot has all required API tokens to function."""
+    # Note: ENCRYPTION_KEY removed as we are using plain-text storage
+    required_vars = ["TELEGRAM_TOKEN", "GEMINI_API_KEY"]
     missing = [var for var in required_vars if not os.getenv(var)]
     
     if missing:
         print("❌ CRITICAL ERROR: Missing Environment Variables!")
         print(f"Please define the following in your .env or hosting provider: {', '.join(missing)}")
-        sys.exit(1)
-    
-    # Ensure the encryption key is the correct length for Fernet (32 url-safe base64-encoded bytes)
-    # This prevents the bot from crashing mid-execution during the first user signup.
-    try:
-        from cryptography.fernet import Fernet
-        Fernet(os.getenv("ENCRYPTION_KEY").encode())
-    except Exception:
-        print("❌ CRITICAL ERROR: ENCRYPTION_KEY is invalid. Generate a new one using Fernet.generate_key().")
         sys.exit(1)
 
 # --- 3. THE LAUNCHER ---
@@ -34,7 +26,7 @@ def start_engine():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("ClawLauncher")
     
-    logger.info("⚡ Initializing Claw-Mentor Multi-User SaaS Engine...")
+    logger.info("⚡ Initializing Binentor Engine (Standard Edition)...")
     
     check_environment()
     
