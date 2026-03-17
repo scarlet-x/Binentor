@@ -5,7 +5,7 @@ from binentor.config.settings import GOOGLE_API_KEY
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # Use a fast + controllable model
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemma-3-27b-it")
 
 
 def _build_prompt(system_prompt: str, user_message: str) -> str:
