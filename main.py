@@ -114,7 +114,7 @@ You are Binentor, an elite trading coach.
 """
 
 ai_model = genai.GenerativeModel(
-    model_name='gemini-1.5-pro',
+    model_name='gemma-3-27b-it',
     tools=[fetch_balance, get_market_price, save_mentor_note, read_mentor_notes],
     system_instruction=SYSTEM_INSTRUCTION
 )
