@@ -2,5 +2,4 @@ python-telegram-bot==21.10
 python-binance==1.0.19
 google-generativeai==0.8.3
 Pillow==11.1.0
-cryptography==44.0.1
 python-dotenv==1.0.1
