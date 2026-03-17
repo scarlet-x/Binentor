@@ -25,7 +25,7 @@ current_user_id = contextvars.ContextVar('current_user_id', default=None)
 
 # --- 2. DATABASE & MEMORY LAYER ---
 def init_db():
-    conn = sqlite3.connect('claw_mentor.db')
+    conn = sqlite3.connect('binentor.db')
     c = conn.cursor()
     # User Credentials - Changed BLOB to TEXT since we aren't encrypting
     c.execute('''CREATE TABLE IF NOT EXISTS users 
@@ -38,16 +38,24 @@ def init_db():
 
 init_db()
 
+def has_keys(user_id) -> bool:
+    """Fast check to see if the user has provided keys without initializing the Binance client."""
+    conn = sqlite3.connect('binentor.db')
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
+
 def get_binance_client(user_id):
     """Retrieves plain-text keys for a specific user and returns a Binance client."""
-    conn = sqlite3.connect('claw_mentor.db')
+    conn = sqlite3.connect('binentor.db')
     c = conn.cursor()
     c.execute("SELECT api_key, secret_key FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
     
     if row:
-        # No decryption needed here anymore
         api, secret = row[0], row[1]
         return BinanceClient(api, secret)
     return None
@@ -79,7 +87,7 @@ def get_market_price(symbol: str) -> str:
 def save_mentor_note(note: str) -> str:
     """Saves a lesson to the specific user's long-term profile."""
     user_id = current_user_id.get()
-    conn = sqlite3.connect('claw_mentor.db')
+    conn = sqlite3.connect('binentor.db')
     conn.cursor().execute("INSERT INTO memory (user_id, note) VALUES (?, ?)", (user_id, note))
     conn.commit()
     conn.close()
@@ -88,7 +96,7 @@ def save_mentor_note(note: str) -> str:
 def read_mentor_notes() -> str:
     """Retrieves all past lessons for this specific user."""
     user_id = current_user_id.get()
-    conn = sqlite3.connect('claw_mentor.db')
+    conn = sqlite3.connect('binentor.db')
     rows = conn.cursor().execute("SELECT note FROM memory WHERE user_id=?", (user_id,)).fetchall()
     conn.close()
     return "User Notes: " + "; ".join([r[0] for r in rows]) if rows else "No previous notes."
@@ -97,7 +105,7 @@ def read_mentor_notes() -> str:
 genai.configure(api_key=GEMINI_API_KEY)
 
 SYSTEM_INSTRUCTION = """
-You are Claw-Mentor, an elite trading coach.
+You are Binentor, an elite trading coach.
 1. Use your tools to fetch user balance or prices automatically.
 2. Maintain user-specific context using 'read_mentor_notes'.
 3. Focus on risk management and discipline.
@@ -114,16 +122,23 @@ user_sessions = {}
 # --- 5. TELEGRAM HANDLERS ---
 ASK_API, ASK_SECRET = range(2)
 
+# Custom filter to intercept messages from users without keys
+class NoKeysFilter(filters.MessageFilter):
+    def filter(self, message):
+        if not message or not message.from_user: return False
+        return not has_keys(message.from_user.id)
+
+no_keys_filter = NoKeysFilter()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    client = get_binance_client(user_id)
     
-    if client:
-        await update.message.reply_text("🛡️ **Claw-Mentor Active.**\nHow can I help you with your trades today?")
+    if has_keys(user_id):
+        await update.message.reply_text("🛡️ **Binentor Active.**\nHow can I help you with your trades today?")
         return ConversationHandler.END
     else:
         await update.message.reply_text(
-            "👋 **I am Claw-Mentor.**\nSend me your **Binance API Key** to get started (Read-Only keys recommended):"
+            "👋 **I am Binentor.**\nIt looks like you haven't linked your account yet.\nSend me your **Binance API Key** to get started (Read-Only keys recommended):"
         )
         return ASK_API
 
@@ -138,12 +153,12 @@ async def handle_secret_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     secret_key = update.message.text
     
     # Save as plain text
-    conn = sqlite3.connect('claw_mentor.db')
+    conn = sqlite3.connect('binentor.db')
     conn.cursor().execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?)", (user_id, api_key, secret_key))
     conn.commit()
     conn.close()
     
-    await update.message.reply_text("✅ **Keys Saved.** You are now linked to Claw-Mentor.")
+    await update.message.reply_text("✅ **Keys Saved.** You are now linked to Binentor.")
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,7 +199,11 @@ if __name__ == '__main__':
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     onboarding_conv = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[
+            CommandHandler('start', start),
+            # Intercepts any text/photo message if the user doesn't have keys in the database
+            MessageHandler(no_keys_filter & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, start) 
+        ],
         states={
             ASK_API: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_api_key)],
             ASK_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_secret_key)],
@@ -196,5 +215,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_handler))
 
-    logger.info("Claw-Mentor (Standard Edition) Online.")
+    logger.info("Binentor (Standard Edition) Online.")
     app.run_polling()
