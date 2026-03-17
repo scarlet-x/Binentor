@@ -6,7 +6,7 @@ import sqlite3
 import contextvars
 from PIL import Image
 
-from telegram import Update, constants, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler
@@ -109,15 +109,16 @@ def read_notes():
     return "Notes:\n" + "\n".join([r[0] for r in rows])
 
 
-# --- AI ---
+# --- AI SETUP (Gemma compatible) ---
 SYSTEM_PROMPT = """
 You are Binentor, a strict trading mentor.
 
 Rules:
 - Be sharp, direct, logical.
-- Focus on discipline, risk, mistakes.
+- Focus on discipline, risk, and mistakes.
 
-When you need a tool, respond ONLY like:
+Tool usage:
+If needed, respond EXACTLY like:
 
 TOOL_CALL: function_name(arg=value)
 
@@ -131,8 +132,7 @@ Otherwise respond normally.
 """
 
 model = genai.GenerativeModel(
-    model_name="gemma-3-27b-it",
-    system_instruction=SYSTEM_PROMPT
+    model_name="gemma-3-27b-it"
 )
 
 sessions = {}
@@ -140,7 +140,7 @@ sessions = {}
 
 # --- TOOL PARSER ---
 def parse_tool(text):
-    match = re.search(r"TOOL_CALL:\s*(\w+)\((.*?)\)", text)
+    match = re.search(r"TOOL_CALL:\s*(\w+)(.*?)", text)
 
     if not match:
         return None, {}
@@ -150,10 +150,9 @@ def parse_tool(text):
 
     args = {}
     if args_str:
-        parts = args_str.split(",")
-        for p in parts:
-            if "=" in p:
-                k, v = p.split("=")
+        for part in args_str.split(","):
+            if "=" in part:
+                k, v = part.split("=")
                 args[k.strip()] = v.strip().strip('"')
 
     return name, args
@@ -218,6 +217,7 @@ async def save_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# --- MAIN AI LOOP ---
 async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     current_user_id.set(uid)
@@ -229,8 +229,11 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         user_text = update.message.text
-        response = await chat.send_message_async(user_text)
 
+        # Inject system prompt every time (Gemma workaround)
+        full_prompt = f"{SYSTEM_PROMPT}\n\nUser: {user_text}"
+
+        response = await chat.send_message_async(full_prompt)
         text = response.text
 
         tool, args = parse_tool(text)
@@ -238,7 +241,10 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tool:
             result = execute_tool(tool, args)
 
-            final = await chat.send_message_async(f"Tool result: {result}")
+            # Second pass with tool result
+            final_prompt = f"{SYSTEM_PROMPT}\n\nTool result: {result}"
+            final = await chat.send_message_async(final_prompt)
+
             await update.message.reply_text(final.text)
         else:
             await update.message.reply_text(text)
@@ -248,6 +254,7 @@ async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
 
 
+# --- IMAGE HANDLER (still Gemini, Gemma can't see images) ---
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = await update.message.photo[-1].get_file()
     buf = io.BytesIO()
@@ -256,8 +263,8 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     img = Image.open(buf)
 
     vision = genai.GenerativeModel("gemini-1.5-pro")
+    res = await vision.generate_content_async(["Analyze this trading chart", img])
 
-    res = await vision.generate_content_async(["Analyze this chart", img])
     await update.message.reply_text(res.text)
 
 
@@ -268,18 +275,3 @@ if __name__ == "__main__":
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(no_keys & filters.TEXT, start)
-        ],
-        states={
-            ASK_API: [MessageHandler(filters.TEXT, save_api)],
-            ASK_SECRET: [MessageHandler(filters.TEXT, save_secret)],
-        },
-        fallbacks=[]
-    )
-
-    app.add_handler(conv)
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    app.add_handler(MessageHandler(filters.TEXT, main_handler))
-
-    logger.info("Bot running...")
-    app.run_polling()
