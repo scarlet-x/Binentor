@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Env Vars
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # Context variable to track which user is currently triggering the AI tools
 current_user_id = contextvars.ContextVar('current_user_id', default=None)
