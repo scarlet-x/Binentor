@@ -140,7 +140,7 @@ sessions = {}
 
 # --- TOOL PARSER ---
 def parse_tool(text):
-    match = re.search(r"TOOL_CALL:\s*(\w+)(.*?)", text)
+    match = re.search(r"TOOL_CALL:\s*(\w+)\((.*?)\)", text)
 
     if not match:
         return None, {}
@@ -275,3 +275,18 @@ if __name__ == "__main__":
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
+            MessageHandler(no_keys & filters.TEXT, start)
+        ],
+        states={
+            ASK_API: [MessageHandler(filters.TEXT, save_api)],
+            ASK_SECRET: [MessageHandler(filters.TEXT, save_secret)],
+        },
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+    )
+
+    app.add_handler(conv)
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_handler))
+
+    logger.info("Binentor running (Gemma mode)...")
+    app.run_polling()
