@@ -2,7 +2,7 @@ import google.generativeai as genai
 from typing import Optional
 from binentor.config.settings import GOOGLE_API_KEY
 
-genai.configure(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # Use a fast + controllable model
 model = genai.GenerativeModel("gemini-1.5-flash")
