@@ -10,68 +10,48 @@ model = genai.GenerativeModel("gemma-3-27b-it")
 
 def _build_prompt(system_prompt: str, user_message: str) -> str:
     """
-    Combines system personality + user input into a structured prompt.
+    Combines system personality + user input cleanly.
+    This lets the `system_prompt` entirely dictate how the bot acts, 
+    allowing it to respond dynamically based on the context you pass to it.
     """
-
-    return f"""
-{system_prompt}
-
----
-
-User says:
-{user_message}
-
----
-
-Instructions:
-- Follow the personality strictly
-- Keep responses short and human
-- Avoid long explanations unless asked
-- No markdown abuse (no #, >, etc.)
-- Give practical, mentor-style answers
-"""
+    if system_prompt:
+        return f"{system_prompt.strip()}\n\nUser: {user_message.strip()}\nBot:"
+    
+    return user_message.strip()
 
 
-def _post_process(response_text: str, max_length: int = 900) -> str:
+def _post_process(response_text: str) -> str:
     """
-    Clean up LLM output.
+    Clean up LLM output without destroying useful formatting.
     """
-
     if not response_text:
         return "Something went wrong. Try again."
 
-    text = response_text.strip()
-
-    # Remove bad markdown patterns
-    banned_patterns = ["```", "###", "##", "# ", "> "]
-    for pattern in banned_patterns:
-        text = text.replace(pattern, "")
-
-    # Hard trim (safety)
-    if len(text) > max_length:
-        text = text[:max_length].rstrip() + "..."
-
-    return text
+    # Simply clean up extra whitespace. We leave Markdown intact so the 
+    # bot can use lists, code blocks, and bold text when necessary.
+    return response_text.strip()
 
 
 async def generate_response(
     system_prompt: str,
     user_message: str,
     user_id: Optional[str] = None,
+    max_tokens: int = 1500,  # Increased default so the bot isn't cut off
+    temperature: float = 0.7 # Made dynamic if you want to change it later
 ) -> str:
     """
     Main function used by the agent.
     """
-
     try:
         prompt = _build_prompt(system_prompt, user_message)
 
-        response = model.generate_content(
+        # Using the async version of generate_content for better performance
+        response = await model.generate_content_async(
             prompt,
             generation_config={
-                "temperature": 0.7,     # balanced creativity
+                "temperature": temperature,     
                 "top_p": 0.9,
-                "max_output_tokens": 300,  # controls length
+                "max_output_tokens": max_tokens
             },
         )
 
