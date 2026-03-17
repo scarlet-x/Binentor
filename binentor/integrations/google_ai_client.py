@@ -1,6 +1,6 @@
 import google.generativeai as genai
 from typing import Optional
-from binentor.config.settings import GEMINI_API_KEY
+from binentor.config.settings import GOOGLE_API_KEY
 
 genai.configure(api_key=GEMINI_API_KEY)
 
