@@ -44,9 +44,30 @@ PRICE_CACHE = {}
 CACHE_TIME = 5
 
 
+# ---------------- FILE HELPERS ----------------
+
+def read_md(filename):
+
+    if not os.path.exists(filename):
+        return ""
+
+    with open(filename, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def update_memory(entry):
+
+    if len(entry) < 10:
+        return
+
+    with open("memory.md", "a", encoding="utf-8") as f:
+        f.write(f"\n- {entry}")
+
+
 # ---------------- BINANCE KEY STORAGE ----------------
 
 def load_binance_keys():
+
     if not os.path.exists(BINANCE_KEYS_FILE):
         return {}
 
@@ -55,6 +76,7 @@ def load_binance_keys():
 
 
 def save_binance_keys(data):
+
     with open(BINANCE_KEYS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -104,6 +126,7 @@ def save_history(user_id, history):
 # ---------------- WATCHLIST ----------------
 
 def load_watchlist():
+
     if not os.path.exists(WATCHLIST_FILE):
         return {}
 
@@ -112,6 +135,7 @@ def load_watchlist():
 
 
 def save_watchlist(data):
+
     with open(WATCHLIST_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -210,7 +234,6 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         width, height = image.size
         img = np.array(image)
 
-        # Trend (brightness)
         brightness = img.mean()
 
         if brightness > 160:
@@ -220,7 +243,6 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             trend_bias = "Sideways"
 
-        # Volatility (edges)
         gx = np.abs(np.diff(img, axis=1))
         gy = np.abs(np.diff(img, axis=0))
         edges = np.mean(gx) + np.mean(gy)
@@ -232,20 +254,22 @@ async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             volatility = "Low"
 
-        # Support / Resistance (horizontal scan)
         horizontal = np.mean(img, axis=1)
 
         support = list(np.argsort(horizontal)[:3])
         resistance = list(np.argsort(horizontal)[-3:])
 
-        # Price zone
         mid = height // 2
         if np.mean(img[mid-20:mid+20]) > brightness:
             price_zone = "Upper zone"
         else:
             price_zone = "Lower zone"
 
+        personality = read_md("personality.md")
+
         context_text = f"""
+{personality}
+
 Chart Data:
 
 Trend: {trend_bias}
@@ -276,7 +300,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setbinance <key> <secret>\n"
         "/portfolio\n"
         "/price BTC\n"
-        "Send chart screenshot for analysis 📊"
+        "Send chart screenshot 📊"
     )
 
 
@@ -338,30 +362,38 @@ async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = "\n".join(history_list[-10:])
 
     portfolio_context = get_portfolio_summary(user_id)
+    personality = read_md("personality.md")
+    memory = read_md("memory.md")
 
     prompt = f"""
-You are a crypto mentor.
+{personality}
+
+Long-term Memory:
+{memory}
 
 Portfolio:
 {portfolio_context}
 
-History:
+Recent Conversation:
 {history}
 
 User: {text}
 
-Answer briefly (max 5 sentences).
+Respond like a sharp crypto mentor.
+Be concise, confident, practical.
+Max 5 sentences.
 """
 
     await update.message.chat.send_action(constants.ChatAction.TYPING)
 
     try:
         response = ai_model.generate_content(prompt)
-
         reply = response.text
 
         history_list.extend([f"User: {text}", f"Bot: {reply}"])
         save_history(user_id, history_list)
+
+        update_memory(f"User asked: {text}")
 
         await update.message.reply_text(reply)
 
@@ -381,10 +413,7 @@ def main():
     app.add_handler(CommandHandler("portfolio", portfolio))
     app.add_handler(CommandHandler("price", price))
 
-    # IMAGE FIRST (important)
     app.add_handler(MessageHandler(filters.PHOTO, photo))
-
-    # TEXT
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat))
 
     logger.info("Bot running...")
