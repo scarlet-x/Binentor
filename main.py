@@ -268,13 +268,14 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.chat.send_action(action=ChatAction.TYPING)
         
-        photo = await update.message.photo[-1].get_file()
-        buf = io.BytesIO()
-        await photo.download_to_memory(buf)
+        # 1. Get the highest resolution photo
+        photo_file = await update.message.photo[-1].get_file()
         
-        # Reset buffer pointer for PIL
-        buf.seek(0)
-        img = Image.open(buf)  
+        # 2. Download it as a byte array (Correct PTB v20+ method)
+        file_bytes = await photo_file.download_as_bytearray()
+        
+        # 3. Load the bytes directly into PIL
+        img = Image.open(io.BytesIO(file_bytes))  
         
         analysis_prompt = """
         Analyze this screenshot. If it is a trading chart, provide a strict, concise technical analysis.
@@ -296,7 +297,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Image error: {e}")
-        await update.message.reply_text("Failed to process the image. Ensure it's a valid screenshot.")
+        await update.message.reply_text(f"Failed to process the image. Error: {e}")
 
 # --- MAIN ---
 
