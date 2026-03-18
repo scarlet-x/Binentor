@@ -47,7 +47,6 @@ CACHE_TIME = 5
 # ---------------- BINANCE KEY STORAGE ----------------
 
 def load_binance_keys():
-
     if not os.path.exists(BINANCE_KEYS_FILE):
         return {}
 
@@ -56,7 +55,6 @@ def load_binance_keys():
 
 
 def save_binance_keys(data):
-
     with open(BINANCE_KEYS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -78,17 +76,6 @@ def get_user_binance_client(user_id):
         )
     except:
         return None
-
-
-# ---------------- FILE HELPERS ----------------
-
-def read_md(filename):
-
-    if not os.path.exists(filename):
-        return ""
-
-    with open(filename, "r", encoding="utf-8") as f:
-        return f.read()
 
 
 # ---------------- HISTORY ----------------
@@ -117,7 +104,6 @@ def save_history(user_id, history):
 # ---------------- WATCHLIST ----------------
 
 def load_watchlist():
-
     if not os.path.exists(WATCHLIST_FILE):
         return {}
 
@@ -126,7 +112,6 @@ def load_watchlist():
 
 
 def save_watchlist(data):
-
     with open(WATCHLIST_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -165,7 +150,6 @@ def get_portfolio(user_id):
         balances = []
 
         for asset in account["balances"]:
-
             total = float(asset["free"]) + float(asset["locked"])
 
             if total > 0:
@@ -211,6 +195,78 @@ Total: ${round(total_value,2)}
 """
 
 
+# ---------------- IMAGE ANALYSIS ----------------
+
+async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    await update.message.reply_text("📊 Reading chart data...")
+
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        img_bytes = await photo_file.download_as_bytearray()
+
+        image = Image.open(io.BytesIO(img_bytes)).convert("L")
+
+        width, height = image.size
+        img = np.array(image)
+
+        # Trend (brightness)
+        brightness = img.mean()
+
+        if brightness > 160:
+            trend_bias = "Bullish"
+        elif brightness < 100:
+            trend_bias = "Bearish"
+        else:
+            trend_bias = "Sideways"
+
+        # Volatility (edges)
+        gx = np.abs(np.diff(img, axis=1))
+        gy = np.abs(np.diff(img, axis=0))
+        edges = np.mean(gx) + np.mean(gy)
+
+        if edges > 40:
+            volatility = "High"
+        elif edges > 20:
+            volatility = "Moderate"
+        else:
+            volatility = "Low"
+
+        # Support / Resistance (horizontal scan)
+        horizontal = np.mean(img, axis=1)
+
+        support = list(np.argsort(horizontal)[:3])
+        resistance = list(np.argsort(horizontal)[-3:])
+
+        # Price zone
+        mid = height // 2
+        if np.mean(img[mid-20:mid+20]) > brightness:
+            price_zone = "Upper zone"
+        else:
+            price_zone = "Lower zone"
+
+        context_text = f"""
+Chart Data:
+
+Trend: {trend_bias}
+Volatility: {volatility}
+Price Zone: {price_zone}
+
+Support (px): {support}
+Resistance (px): {resistance}
+
+Give a short trading insight.
+"""
+
+        response = ai_model.generate_content(context_text)
+
+        await update.message.reply_text(response.text)
+
+    except Exception as e:
+        logger.error(e)
+        await update.message.reply_text("❌ Chart analysis failed.")
+
+
 # ---------------- COMMANDS ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -219,7 +275,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚀 Crypto Mentor Bot\n\n"
         "/setbinance <key> <secret>\n"
         "/portfolio\n"
-        "/price BTC"
+        "/price BTC\n"
+        "Send chart screenshot for analysis 📊"
     )
 
 
@@ -250,7 +307,6 @@ async def set_binance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = str(update.effective_user.id)
-
     data = get_portfolio_summary(user_id)
 
     await update.message.reply_text(data)
@@ -325,6 +381,10 @@ def main():
     app.add_handler(CommandHandler("portfolio", portfolio))
     app.add_handler(CommandHandler("price", price))
 
+    # IMAGE FIRST (important)
+    app.add_handler(MessageHandler(filters.PHOTO, photo))
+
+    # TEXT
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat))
 
     logger.info("Bot running...")
