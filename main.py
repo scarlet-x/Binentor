@@ -1,324 +1,335 @@
 import os
 import io
-import re
+import time
+import json
 import logging
-import sqlite3
-import contextvars
+import re
 import requests
+import numpy as np
 from PIL import Image
 
-from telegram import Update
-from telegram.constants import ChatAction
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    filters, ContextTypes, ConversationHandler
-)
+from telegram import Update, constants
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from binance.client import Client as BinanceClient
 import google.generativeai as genai
 
-# --- CONFIG ---
 
-logging.basicConfig(level=logging.INFO)
+# ---------------- CONFIG ----------------
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+WATCHLIST_FILE = "watchlist.json"
+HISTORY_DIR = "history"
+BINANCE_KEYS_FILE = "binance_keys.json"
+
+
+# ---------------- AI ----------------
+
 genai.configure(api_key=GEMINI_API_KEY)
+ai_model = genai.GenerativeModel("gemma-3-27b-it")
 
-current_user_id = contextvars.ContextVar('current_user_id', default=None)
 
-# --- DATABASE ---
+# ---------------- CACHE ----------------
 
-def init_db():
-    conn = sqlite3.connect('binentor.db')
-    c = conn.cursor()
+PRICE_CACHE = {}
+CACHE_TIME = 5
 
-    c.execute('''CREATE TABLE IF NOT EXISTS users  
-                 (user_id INTEGER PRIMARY KEY, api_key TEXT, secret_key TEXT)''')  
 
-    c.execute('''CREATE TABLE IF NOT EXISTS memory  
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, note TEXT)''')  
+# ---------------- BINANCE KEY STORAGE ----------------
 
-    conn.commit()  
-    conn.close()
+def load_binance_keys():
 
-init_db()
+    if not os.path.exists(BINANCE_KEYS_FILE):
+        return {}
 
-def has_keys(user_id):
-    conn = sqlite3.connect('binentor.db')
-    row = conn.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
-    return row is not None
+    with open(BINANCE_KEYS_FILE) as f:
+        return json.load(f)
 
-def get_client(user_id):
-    conn = sqlite3.connect('binentor.db')
-    row = conn.execute("SELECT api_key, secret_key FROM users WHERE user_id=?", (user_id,)).fetchone()
-    conn.close()
 
-    if row:  
-        return BinanceClient(row[0], row[1])  
-    return None
+def save_binance_keys(data):
 
-# --- TOOLS ---
+    with open(BINANCE_KEYS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-def fetch_balance():
-    user_id = current_user_id.get()
-    client = get_client(user_id)
 
-    if not client:  
-        return "No Binance keys."  
+def get_user_binance_client(user_id):
 
-    try:  
-        acc = client.get_account()  
-        balances = [  
-            f"{b['asset']}: {b['free']}"  
-            for b in acc['balances']  
-            if float(b['free']) > 0  
-        ]  
-        return "Portfolio:\n" + "\n".join(balances)  
-    except Exception as e:  
-        return str(e)
+    data = load_binance_keys()
+    user = data.get(str(user_id))
 
-def get_market_price(symbol):
+    if not user:
+        return None
+
     try:
-        # Requires valid keys or public endpoint configuration depending on Binance region
-        client = BinanceClient("", "")
-        price = client.get_symbol_ticker(symbol=symbol.upper())
-        return f"{symbol.upper()} price: {price['price']}"
+        return BinanceClient(
+            user["api_key"],
+            user["api_secret"],
+            tld="com",
+            requests_params={"timeout": 20}
+        )
+    except:
+        return None
+
+
+# ---------------- FILE HELPERS ----------------
+
+def read_md(filename):
+
+    if not os.path.exists(filename):
+        return ""
+
+    with open(filename, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+# ---------------- HISTORY ----------------
+
+def load_history(user_id):
+
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    path = f"{HISTORY_DIR}/{user_id}.json"
+
+    if not os.path.exists(path):
+        return []
+
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_history(user_id, history):
+
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    path = f"{HISTORY_DIR}/{user_id}.json"
+
+    with open(path, "w") as f:
+        json.dump(history[-20:], f)
+
+
+# ---------------- WATCHLIST ----------------
+
+def load_watchlist():
+
+    if not os.path.exists(WATCHLIST_FILE):
+        return {}
+
+    with open(WATCHLIST_FILE) as f:
+        return json.load(f)
+
+
+def save_watchlist(data):
+
+    with open(WATCHLIST_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ---------------- MARKET ----------------
+
+def get_price(symbol):
+
+    now = time.time()
+
+    if symbol in PRICE_CACHE:
+        price, ts = PRICE_CACHE[symbol]
+        if now - ts < CACHE_TIME:
+            return price
+
+    try:
+        r = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}")
+        price = float(r.json()["price"])
+        PRICE_CACHE[symbol] = (price, now)
+        return price
+    except:
+        return None
+
+
+# ---------------- PORTFOLIO ----------------
+
+def get_portfolio(user_id):
+
+    client = get_user_binance_client(user_id)
+
+    if not client:
+        return None
+
+    try:
+        account = client.get_account()
+        balances = []
+
+        for asset in account["balances"]:
+
+            total = float(asset["free"]) + float(asset["locked"])
+
+            if total > 0:
+                balances.append((asset["asset"], total))
+
+        return balances
+
     except Exception as e:
-        return f"Invalid symbol or API error: {e}"
+        logger.error(e)
+        return None
 
-def get_crypto_price_coingecko(coin):
-    try:
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin.lower()}&vs_currencies=usd"
-        res = requests.get(url).json()
 
-        if coin.lower() in res:  
-            price = res[coin.lower()]['usd']  
-            return f"{coin.upper()} price: ${price}"  
-        else:  
-            return "Coin not found."  
-    except Exception as e:  
-        return str(e)
+def get_portfolio_summary(user_id):
 
-def save_note(note):
-    user_id = current_user_id.get()
-    conn = sqlite3.connect('binentor.db')
-    conn.execute("INSERT INTO memory (user_id, note) VALUES (?, ?)", (user_id, note))
-    conn.commit()
-    conn.close()
-    return "Saved."
+    balances = get_portfolio(user_id)
 
-def read_notes():
-    user_id = current_user_id.get()
-    conn = sqlite3.connect('binentor.db')
-    rows = conn.execute("SELECT note FROM memory WHERE user_id=?", (user_id,)).fetchall()
-    conn.close()
+    if not balances:
+        return "⚠️ No Binance account connected. Use /setbinance"
 
-    if not rows:  
-        return "No notes."  
-    return "Notes:\n" + "\n".join([r[0] for r in rows])
+    total_value = 0
+    summary = []
 
-# --- AI SETUP ---
+    for asset, amount in balances:
 
-SYSTEM_PROMPT = """
-You are Binentor, a strict trading mentor.
+        if asset == "USDT":
+            value = amount
+        else:
+            price = get_price(asset + "USDT")
+            if not price:
+                continue
+            value = amount * price
 
-Rules:
-- Be sharp, direct, logical.
-- Focus on discipline, risk, and mistakes.
+        total_value += value
 
-Tool usage:
-If needed, respond EXACTLY like:
-TOOL_CALL: function_name(arg="value")
+        summary.append(f"{asset}: {round(amount,6)} (~${round(value,2)})")
 
-DO NOT explain tool calls.
+    return f"""
+💼 PORTFOLIO
 
-Functions:
-- fetch_balance()
-- get_market_price(symbol="BTCUSDT")
-- get_crypto_price_coingecko(coin="bitcoin")
-- save_note(note="text")
-- read_notes()
+Total: ${round(total_value,2)}
+
+{chr(10).join(summary)}
 """
 
-model = genai.GenerativeModel(
-    model_name="gemma-3-27b-it"
-)
 
-sessions = {}
-
-# --- TOOL PARSER ---
-
-def parse_tool(text):
-    # FIXED: Added capture groups for both function name and arguments
-    match = re.search(r"TOOL_CALL:\s*([a-zA-Z_]+)\((.*?)\)", text)
-
-    if not match:  
-        return None, {}  
-
-    name = match.group(1)  
-    args_str = match.group(2)  
-
-    args = {}  
-    if args_str:  
-        for part in args_str.split(","):  
-            if "=" in part:  
-                k, v = part.split("=", 1)  
-                # Strip out spaces and quotes for clean arguments
-                args[k.strip()] = v.strip().strip('"\'')  
-
-    return name, args
-
-def execute_tool(name, args):
-    if name == "fetch_balance":
-        return fetch_balance()
-    elif name == "get_market_price":  
-        return get_market_price(args.get("symbol", ""))  
-    elif name == "get_crypto_price_coingecko":  
-        return get_crypto_price_coingecko(args.get("coin", ""))  
-    elif name == "save_note":  
-        return save_note(args.get("note", ""))  
-    elif name == "read_notes":  
-        return read_notes()  
-
-    return "Unknown tool"
-
-# --- HANDLERS ---
-
-ASK_API, ASK_SECRET = range(2)
-
-class NoKeysFilter(filters.MessageFilter):
-    def filter(self, message):
-        return message and message.from_user and not has_keys(message.from_user.id)
-
-no_keys = NoKeysFilter()
+# ---------------- COMMANDS ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
 
-    if has_keys(uid):  
-        await update.message.reply_text("Binentor active.")  
-        return ConversationHandler.END  
+    await update.message.reply_text(
+        "🚀 Crypto Mentor Bot\n\n"
+        "/setbinance <key> <secret>\n"
+        "/portfolio\n"
+        "/price BTC"
+    )
 
-    await update.message.reply_text("Send API Key:")  
-    return ASK_API
 
-async def save_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['api'] = update.message.text
-    await update.message.reply_text("Send Secret Key:")
-    return ASK_SECRET
+async def set_binance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-async def save_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    api = context.user_data['api']
-    secret = update.message.text
+    user_id = str(update.effective_user.id)
 
-    conn = sqlite3.connect('binentor.db')  
-    conn.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?)", (uid, api, secret))  
-    conn.commit()  
-    conn.close()  
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage:\n/setbinance <API_KEY> <API_SECRET>"
+        )
+        return
 
-    await update.message.reply_text("Keys saved.")  
-    return ConversationHandler.END
+    api_key = context.args[0]
+    api_secret = context.args[1]
 
-# --- MAIN AI LOOP ---
+    data = load_binance_keys()
+    data[user_id] = {
+        "api_key": api_key,
+        "api_secret": api_secret
+    }
 
-async def main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    current_user_id.set(uid)
+    save_binance_keys(data)
 
-    if uid not in sessions:  
-        sessions[uid] = model.start_chat(history=[  
-            {"role": "user", "parts": [SYSTEM_PROMPT]},
-            {"role": "model", "parts": ["Understood. I am Binentor. I will be direct and strict."]}
-        ])  
+    await update.message.reply_text("✅ Binance connected.")
 
-    chat = sessions[uid]  
 
-    try:  
-        user_text = update.message.text  
+async def portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-        await update.message.chat.send_action(action=ChatAction.TYPING)  
+    user_id = str(update.effective_user.id)
 
-        response = await chat.send_message_async(user_text)  
-        text = response.text.strip()  
+    data = get_portfolio_summary(user_id)
 
-        tool, args = parse_tool(text)  
+    await update.message.reply_text(data)
 
-        if tool:  
-            result = execute_tool(tool, args)  
 
-            await update.message.chat.send_action(action=ChatAction.TYPING)  
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-            final = await chat.send_message_async(f"Tool result: {result}")  
-            await update.message.reply_text(final.text)  
-        else:  
-            await update.message.reply_text(text)  
+    if not context.args:
+        return
 
-    except Exception as e:  
-        logger.error(e)  
-        await update.message.reply_text(f"Error: {e}")
+    coin = context.args[0].upper()
+    price = get_price(coin + "USDT")
 
-# --- IMAGE HANDLER ---
+    if not price:
+        await update.message.reply_text("Token not found")
+        return
 
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"{coin} price: ${price}")
+
+
+# ---------------- AI CHAT ----------------
+
+async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user_id = str(update.effective_user.id)
+    text = update.message.text
+
+    history_list = load_history(user_id)
+    history = "\n".join(history_list[-10:])
+
+    portfolio_context = get_portfolio_summary(user_id)
+
+    prompt = f"""
+You are a crypto mentor.
+
+Portfolio:
+{portfolio_context}
+
+History:
+{history}
+
+User: {text}
+
+Answer briefly (max 5 sentences).
+"""
+
+    await update.message.chat.send_action(constants.ChatAction.TYPING)
+
     try:
-        await update.message.chat.send_action(action=ChatAction.TYPING)
-        
-        # 1. Get the highest resolution photo
-        photo_file = await update.message.photo[-1].get_file()
-        
-        # 2. Download it as a byte array (Correct PTB v20+ method)
-        file_bytes = await photo_file.download_as_bytearray()
-        
-        # 3. Load the bytes directly into PIL
-        img = Image.open(io.BytesIO(file_bytes))  
-        
-        analysis_prompt = """
-        Analyze this screenshot. If it is a trading chart, provide a strict, concise technical analysis.
-        
-        Format your response using this exact structure:
-        - **Trend:** (Bullish/Bearish/Neutral)
-        - **Support:** (Key price levels)
-        - **Resistance:** (Key price levels)
-        - **Indicators/Patterns:** (Brief mention of RSI, MACD, or chart patterns)
-        - **Verdict:** (1-2 sentences max on potential next moves)
-        
-        Keep the text extremely minimal. Use bullet points. Do not write large paragraphs unless you are explaining a complex anomaly.
-        """
-        
-        vision = genai.GenerativeModel("gemini-1.5-pro")  
-        res = await vision.generate_content_async([analysis_prompt, img])  
-        
-        await update.message.reply_text(res.text)
-        
+        response = ai_model.generate_content(prompt)
+
+        reply = response.text
+
+        history_list.extend([f"User: {text}", f"Bot: {reply}"])
+        save_history(user_id, history_list)
+
+        await update.message.reply_text(reply)
+
     except Exception as e:
-        logger.error(f"Image error: {e}")
-        await update.message.reply_text(f"Failed to process the image. Error: {e}")
+        logger.error(e)
+        await update.message.reply_text("AI error.")
 
-# --- MAIN ---
 
-if __name__ == "__main__":
+# ---------------- MAIN ----------------
+
+def main():
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    conv = ConversationHandler(  
-        entry_points=[  
-            CommandHandler("start", start),  
-            MessageHandler(no_keys & filters.TEXT, start)  
-        ],  
-        states={  
-            ASK_API: [MessageHandler(filters.TEXT, save_api)],  
-            ASK_SECRET: [MessageHandler(filters.TEXT, save_secret)],  
-        },  
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]  
-    )  
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setbinance", set_binance))
+    app.add_handler(CommandHandler("portfolio", portfolio))
+    app.add_handler(CommandHandler("price", price))
 
-    app.add_handler(conv)  
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))  
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, main_handler))  
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat))
 
-    logger.info("Binentor running (FINAL BUILD)...")  
+    logger.info("Bot running...")
     app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
