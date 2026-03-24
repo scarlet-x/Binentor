@@ -141,7 +141,7 @@ def get_price(symbol):
         return None
 
 
-# ---------------- PORTFOLIO ----------------
+# ---------------- PORTFOLIO & TRADES ----------------
 
 def get_portfolio(user_id):
     client = get_user_binance_client(user_id)
@@ -197,6 +197,38 @@ Total: ${round(total_value,2)}
 
 {chr(10).join(summary)}
 """
+
+def get_recent_trades(user_id, symbol, limit=5):
+    """Fetches recent trades for a specific symbol."""
+    client = get_user_binance_client(user_id)
+    
+    if not client:
+        return "❌ Binance API error or not connected. Use /setbinance"
+
+    symbol = symbol.upper().strip()
+    if not symbol.endswith("USDT") and not symbol.endswith("BTC"):
+        symbol += "USDT" 
+
+    try:
+        trades = client.get_my_trades(symbol=symbol, limit=limit)
+        
+        if not trades:
+            return f"No recent trades found for {symbol}."
+            
+        trade_strs = []
+        for t in trades:
+            side = "🟢 BUY" if t['isBuyer'] else "🔴 SELL"
+            price = float(t['price'])
+            qty = float(t['qty'])
+            
+            time_str = time.strftime('%Y-%m-%d %H:%M', time.gmtime(t['time'] / 1000.0))
+            trade_strs.append(f"{time_str} | {side} {qty} @ ${price:,.2f}")
+            
+        return f"Recent {symbol} Trades:\n" + "\n".join(trade_strs)
+
+    except Exception as e:
+        logger.error(f"Trade history error for {symbol}: {e}")
+        return f"⚠️ Could not fetch trades for {symbol}. (Check if the pair exists or if you have traded it)."
 
 
 # ---------------- IMAGE ANALYSIS ----------------
@@ -334,25 +366,43 @@ History:
 
 User: {text}
 
-Respond like sharp crypto mentor. Max 5 sentences.
+INSTRUCTIONS: 
+1. Respond like a sharp crypto mentor. Max 5 sentences.
+2. CRITICAL: If the user asks about their past trades, performance on a specific coin, or if you need their trade history for a specific token to answer the prompt, reply EXACTLY with:
+FETCH_TRADES: <TICKER>
+(Example: FETCH_TRADES: BTCUSDT). Do not include any other text in your response if you use this command.
 """
 
     await update.message.chat.send_action(constants.ChatAction.TYPING)
 
     try:
+        # Pass 1: Initial LLM evaluation
         response = ai_model.generate_content(prompt)
-        reply = response.text
+        reply = response.text.strip()
 
+        # Pass 2: Intercept the trigger, fetch data, and get final response
+        if reply.startswith("FETCH_TRADES:"):
+            symbol = reply.split("FETCH_TRADES:")[1].strip()
+            
+            # Fetch the actual trade history from Binance
+            trade_data = get_recent_trades(user_id, symbol)
+            
+            # Inject the fetched data back to the LLM
+            second_prompt = prompt + f"\n\n[SYSTEM UPDATE]: You requested trade history for {symbol}. Here is the data:\n{trade_data}\n\nNow, provide your final response to the user's original message based on this new data."
+            
+            second_response = ai_model.generate_content(second_prompt)
+            reply = second_response.text.strip()
+
+        # Save context
         history_list.extend([f"User: {text}", f"Bot: {reply}"])
         save_history(user_id, history_list)
-
         update_memory(f"User asked: {text}")
 
         await update.message.reply_text(reply)
 
     except Exception as e:
-        logger.error(e)
-        await update.message.reply_text("AI error.")
+        logger.error(f"AI Chat Error: {e}")
+        await update.message.reply_text("❌ AI error. Please try again later.")
 
 
 # ---------------- MAIN ----------------
